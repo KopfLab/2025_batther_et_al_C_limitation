@@ -43,7 +43,6 @@ Using `r R.version.string` , @R, and tidyverse version `r packageVersion("tidyve
 
 # load packages
 library(tidyverse)
-library(isocyclr)
 
 # load scripts
 source("scripts/plotting_functions.R")
@@ -55,7 +54,7 @@ source("scripts/plotting_functions.R")
 data <- readxl::read_excel("data/batch_culture_data.xlsx") |>
   transmute(
     growth_phase = growth_phase,
-    crds_CO2 = N2_vol.mL / sample_vol.mL * aerobic_CO2_quant,
+    crds_CO2 = N2_vol.mL / sample_vol.mL * quant_CO2,
     gctcd_CO2 = areas_CO2,
     d13C_CO2 = CO2_corrected_standards,
     d13C_CH4 = CH4_corrected_standards,

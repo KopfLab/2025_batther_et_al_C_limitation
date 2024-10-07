@@ -46,7 +46,7 @@ library(tidyverse)
 library(microbialkitchen)
 
 # load scripts
-
+source("scripts/plotting_functions.R")
 ```
 
 # C-Limitation Batch Cultures
@@ -146,12 +146,19 @@ medium_prep |>
     DIC_init = "mM"
   ) |>
   as.list() |>
-  (function(l) sprintf("%s: %s", names(l), unname(l)) |> cat(sep = "\n"))()
+  (function(l) 
+    sprintf("%s: %s", names(l), map_chr(
+      l, ~if(is.numeric(.x)) paste(signif(.x, 4)) else .x)) |>
+    cat(sep = "\n")
+  )()
 ```
 
 ## TIC consumption
 
 ```{r}
+#| label: fig-experimental-setup
+#| fig-width: 8
+#| fig-height: 6
 # TIC consumption
 medium_prep |>
   crossing(x_TIC_consumed = seq(0, 1, length.out = 10)) |>
@@ -181,21 +188,20 @@ medium_prep |>
   # explicit units
   make_qty_units_explicit(
     actual_H2 = "mmol", 
-    actual_TIC = "mmol",
     actual_pCO2 = "psi",
     actual_DIC = "mM"
   ) |>
   # plot
-  select(buffer_with, x_TIC_consumed, "x_pCO2", starts_with("actual")) |>
-  pivot_longer(cols = c("x_pCO2", starts_with("actual"))) |>
+  select(buffer_with, x_TIC_consumed, matches("actual_(DIC|H2|pCO2|pH)")) |>
+  pivot_longer(cols = c(starts_with("actual"))) |>
+  mutate(panel = str_remove(name, "actual_")) |>
   ggplot() + 
-  aes(1 - x_TIC_consumed, value, color = buffer_with) +
+  aes(1 - x_TIC_consumed, value, color = name) +
   geom_line() +
-  #geom_abline(slope = -1, intercept = 1, linetype = 2) +
-  facet_grid(name ~ ., scales = "free_y") +
+  facet_grid(panel ~ ., scales = "free_y") +
   scale_x_reverse() +
   coord_cartesian(expand = FALSE) +
-  theme_bw() +
+  theme_figure() +
   labs(x = "TIC remaining")
 ```
 
