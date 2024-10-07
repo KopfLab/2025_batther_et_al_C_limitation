@@ -1,0 +1,124 @@
+---
+title: "Literature data comparison"
+date: "`r format(Sys.Date(), '%d %b %Y')`"
+number-sections: true
+number-offset: 0
+toc: true
+toc-depth: 2
+fig-width: 6
+fig-height: 4
+df-print: tibble
+embed-resources: true
+format: 
+  html: 
+    code-tools: true
+    code-fold: show
+    code-summary: "Show the code"
+    toc-float: true
+knitr: 
+  opts_chunk: 
+    fig.path: "plots/"
+    fig.keep: "all"
+    dev: ['png', 'pdf']
+    dev.args: 
+      pdf: 
+        encoding: 'WinAnsi'
+        useDingbats: false
+crossref:
+  fig-prefix: Fig.
+  tbl-prefix: Table
+  ref-hyperlink: true
+editor: source
+editor_options: 
+  chunk_output_type: console
+---
+
+# Setup
+
+Using `r R.version.string` , @R, and tidyverse version `r packageVersion("tidyverse")`, @tidyverse.
+
+```{r}
+#| label: setup
+#| message: false
+
+# load packages
+library(tidyverse)
+
+# load scripts
+source("scripts/plotting_functions.R")
+```
+# Data
+
+```{r}
+# load study data
+this_data <- readxl::read_excel("data/batch_culture_data.xlsx") |>
+  filter(growth_phase == "stationary") |>
+  transmute(
+    paper = "this study",
+    substrate = "H2/CO2",
+    methane = CH4_corrected_standards,
+    lipids = d13C_phytane.permil,
+    biomass = d13C_biomass.permil
+  ) 
+this_data |> knitr::kable()
+
+# load literature data
+literature_data <- readxl::read_excel("data/clim_figure2_table1.xlsx") |>
+  filter(str_detect(paper, "Londry|Summons et al")) |>
+  pivot_wider(
+    id_cols = c("paper", "culture vs field", "substrate", "details"),
+    values_from = "d13C_value", names_from = "product"
+  )
+
+# combine data
+data <- bind_rows(this_data, literature_data)
+```
+
+# Calculations
+
+```{r}
+# calculate fractionation factors
+data_calcs <- 
+  data |>
+  mutate(
+    `alpha biomass/methane` = (biomass/1000 + 1) / (methane/1000 + 1),
+    `alpha lipids/biomass` = (lipids/1000 + 1) / (biomass/1000 + 1)
+  ) |>
+  filter(!if_any(starts_with("alpha"), is.na))
+```
+
+# Visualization
+
+```{r}
+#| label: fig-literature-data
+#| fig-width: 10
+#| fig-height: 8
+data_calcs |>
+  select("paper", "substrate", starts_with("alpha")) |>
+  pivot_longer(
+    cols = starts_with("alpha"),
+    names_to = "factor", values_to = "alpha",
+    names_pattern = "alpha (.*)"
+  ) |>
+  ggplot() +
+  aes(x = substrate, y = alpha, color = paper, shape = paper) +
+  # data
+  geom_hline(yintercept = 1, linetype = 2) + 
+  geom_point(size = 4) +
+  # facets
+  facet_grid(factor ~ ., scales = "free_y", switch = "y") + 
+  # scales
+  scale_color_brewer(palette = "Dark2") + 
+  scale_y_continuous(
+    labels = function(x) sprintf("%+.0f\U2030", 1000 * (x-1)),
+    sec.axis = sec_axis(identity, labels = identity)
+  ) +
+  expand_limits(y = 0.99) +
+  # styling
+  theme_figure(grid = FALSE) +
+  theme(
+    strip.background = element_blank(),
+    strip.placement = "outside"
+  ) +
+  labs(x = NULL, y = "fractionation factor", color = "source", shape = "source")
+```
