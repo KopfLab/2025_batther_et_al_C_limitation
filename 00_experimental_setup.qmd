@@ -1,0 +1,202 @@
+---
+title: "Experimental setup"
+date: "`r format(Sys.Date(), '%d %b %Y')`"
+number-sections: true
+number-offset: 0
+toc: true
+toc-depth: 2
+fig-width: 6
+fig-height: 4
+df-print: tibble
+embed-resources: true
+format: 
+  html: 
+    code-tools: true
+    code-fold: show
+    code-summary: "Show the code"
+    toc-float: true
+knitr: 
+  opts_chunk: 
+    fig.path: "plots/"
+    fig.keep: "all"
+    dev: ['png', 'pdf']
+    dev.args: 
+      pdf: 
+        encoding: 'WinAnsi'
+        useDingbats: false
+crossref:
+  fig-prefix: Fig.
+  tbl-prefix: Table
+  ref-hyperlink: true
+editor: source
+editor_options: 
+  chunk_output_type: console
+---
+
+# Setup
+
+Using `r R.version.string` , @R, and tidyverse version `r packageVersion("tidyverse")`, @tidyverse.
+
+```{r}
+#| label: setup
+#| message: false
+
+# load packages
+library(tidyverse)
+library(microbialkitchen)
+
+# load scripts
+
+```
+
+# C-Limitation Batch Cultures
+
+## Sodium bicarbonate stock
+
+```{r}
+# make bicarbonate stock solution
+bicarb_stock <- 
+  tibble(
+  # with this powder
+  NaHCO3 = qty(1.2, "M"),
+  temperature = qty(23, "C"),
+  # vent with 80:20 N2/CO2, don't pressurize
+  pCO2 = qty(0.85, "bar") * 0.2,
+  pH = calculate_open_system_pH(pCO2, temp = temperature, alkalinity = NaHCO3),
+  DIC = calculate_DIC(pH, pCO2, temp = temperature)
+  # autoclave crimp-sealed
+) |>
+  make_qty_units_explicit(NaHCO3 = "mM", DIC = "mM")
+bicarb_stock
+```
+
+## Media prep
+
+```{r}
+# prepare medium on benchtop (at RT ~ 22C)
+medium_prep <- 
+  tibble(
+    # prepare medium under N2 flushing
+    pCO2 = qty(0, "mbar"),
+    buffer_with = c("MOPS"),
+    pka = c(7.2),
+    buffer = qty(50, "mM"),
+    alk = qty(0, "mM"), # note: for chemostat need to add 25-30 mM alkalinity here b/c we're only adding CO2 later, not NaHCO3
+    rt = qty(22, "C"),
+    pH_open = calculate_open_system_pH(pCO2, temp = rt, alkalinity = alk, buffer = buffer, buffer_pKa = pka),
+    # close up
+    V_liquid = qty(40, "mL"),
+    V_gas = qty(120, "mL"),
+    temp = qty(37, "C"),
+    # flush with pure H2 (at RT, ~22C) to replace N2
+    pH2 = qty(20, "psi"),
+    # total H2
+    TH2 = calculate_ideal_gas_amount(pH2, rt, V_gas),
+    # inject ~ 1.2 M bicarb solution
+    inject_bicarb_sln = qty(0.9, "mL"),
+    TIC = inject_bicarb_sln * qty(1183, "mM"),
+    TH2_TIC_ratio = TH2 / TIC,
+    alk_added = TIC/V_liquid,
+    `yield %` = 8.2,
+    biomass = `yield %`/100 * TIC * qty(30, "g/mol"),
+    # resulting init pH, pCO2, and DIC
+    pH_init_at_rt = calculate_closed_system_pH(
+      TIC = TIC, 
+      V_liquid = V_liquid, V_gas = V_gas,
+      alkalinity = alk + alk_added, buffer = buffer, buffer_pKa = pka,
+      temperature = rt
+    ),
+    pH_init = calculate_closed_system_pH(
+      TIC = TIC, 
+      V_liquid = V_liquid, V_gas = V_gas,
+      alkalinity = alk + alk_added, buffer = buffer, buffer_pKa = pka,
+      temperature = temp
+    ),
+    pCO2_init = calculate_closed_system_pCO2(
+      pH = pH_init, TIC = TIC, V_gas = V_gas, V_liquid = V_liquid,
+      temperature = temp
+    ),
+    DIC_init = calculate_DIC(
+      pH = pH_init, temperature = temp,
+      pCO2 = pCO2_init
+    ),
+    pH_final = calculate_closed_system_pH(
+      TIC = qty(0, "mol"), # if everything is consumed 
+      V_liquid = V_liquid, V_gas = V_gas,
+      alkalinity = alk + alk_added, buffer = buffer, buffer_pKa = pka,
+      temperature = temp
+    )
+    # then inject inoculum
+    # then pressurize with pure H2 to ~20-25 psi (don't flush!)
+    # this gives you > 6:1 H2:CO2 ratio (C limited!)
+  )
+
+# overview
+medium_prep |>
+  # show units
+  make_qty_units_explicit(
+    TH2 = "mmol", 
+    TIC = "mmol",
+    biomass = "mg",
+    alk = "mM",
+    alk_added = "mM",
+    inject_bicarb_sln = "mL",
+    pH2 = "mbar",
+    pCO2_init = "mbar",
+    DIC_init = "mM"
+  ) |>
+  as.list() |>
+  (function(l) sprintf("%s: %s", names(l), unname(l)) |> cat(sep = "\n"))()
+```
+
+## TIC consumption
+
+```{r}
+# TIC consumption
+medium_prep |>
+  crossing(x_TIC_consumed = seq(0, 1, length.out = 10)) |>
+  mutate(
+    # resulting TIC
+    actual_TIC = TIC * (1 - x_TIC_consumed),
+    # resulting pH
+    actual_pH = calculate_closed_system_pH(
+      TIC = actual_TIC, 
+      V_liquid = V_liquid, V_gas = V_gas,
+      alkalinity = alk + alk_added, buffer = buffer, buffer_pKa = pka,
+      temperature = temp
+    ),
+    # results pCO2
+    actual_pCO2 = calculate_closed_system_pCO2(
+      pH = actual_pH, TIC =  actual_TIC, V_gas = V_gas, V_liquid = V_liquid,
+      temperature = temp
+    ),
+    x_pCO2 = actual_pCO2 / pCO2_init,
+    actual_DIC = calculate_DIC(
+      pH = actual_pH, temperature = temp,
+      pCO2 = actual_pCO2
+    ),
+    # yield assumption
+    actual_H2 = TH2 - (4 - `yield %`/100) * x_TIC_consumed * TIC
+  ) |>
+  # explicit units
+  make_qty_units_explicit(
+    actual_H2 = "mmol", 
+    actual_TIC = "mmol",
+    actual_pCO2 = "psi",
+    actual_DIC = "mM"
+  ) |>
+  # plot
+  select(buffer_with, x_TIC_consumed, "x_pCO2", starts_with("actual")) |>
+  pivot_longer(cols = c("x_pCO2", starts_with("actual"))) |>
+  ggplot() + 
+  aes(1 - x_TIC_consumed, value, color = buffer_with) +
+  geom_line() +
+  #geom_abline(slope = -1, intercept = 1, linetype = 2) +
+  facet_grid(name ~ ., scales = "free_y") +
+  scale_x_reverse() +
+  coord_cartesian(expand = FALSE) +
+  theme_bw() +
+  labs(x = "TIC remaining")
+```
+
+
