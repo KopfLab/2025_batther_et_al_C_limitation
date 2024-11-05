@@ -15,6 +15,10 @@ format:
     code-fold: show
     code-summary: "Show the code"
     toc-float: true
+  pdf:
+    toc: false
+  docx: 
+    number-sections: false
 knitr: 
   opts_chunk: 
     fig.path: "plots/"
@@ -46,6 +50,7 @@ library(tidyverse)
 
 # load scripts
 source("scripts/plotting_functions.R")
+source("scripts/table_functions.R")
 ```
 # Data
 
@@ -123,6 +128,28 @@ data_avgs <- data_long |>
 data_avgs |> knitr::kable(d = 2)
 ```
 
+## Data table
+
+```{r}
+data_avgs |>
+  arrange(desc(f_CO2_avg)) |>
+  select("growth_phase", "compound", "d13C_avg", "f_CO2_avg") |>
+  mutate(
+    f_CO2_avg = format_with_decimals(100 * f_CO2_avg, 1) |> paste0("%"),
+    d13C_avg = format_with_decimals(d13C_avg, 1, include_plus = TRUE) |> paste0("\U2030")
+  ) |>
+  pivot_wider(names_from = compound, values_from = d13C_avg, values_fill = "") |>
+  rename(
+    "CO2 remaining" = "f_CO2_avg",
+    "δ13CO2" = "CO2",
+    "δ13CH4" = "CH4",
+    "δ13Cbiomass" = "biomass",
+    "δ13Cphytane" = "phytane"
+  ) |>
+  export_to_excel(file = "output/table1.xlsx")
+```
+
+
 ## Derived parameters
 
 $$
@@ -155,9 +182,11 @@ sprintf("The estimated yield is %.1f%%.\nThe estimated biomass offset from metha
 ```
 
 
-# Model fits
+# Modelling the data
 
-## Catabolism only
+## One step models
+
+### Catabolism only
 
 $$
 \begin{aligned}
@@ -170,70 +199,7 @@ $$
 \end{aligned}
 $$
 
-```{r}
-# general data for model (i.e. not phytane)
-data_for_model <- data_avgs |> filter(compound %in% c("CO2", "CH4", "biomass"))
-
-#' general function for residual calculation in models
-#' @param f from data
-#' @param d13C from data
-#' @param func function to calculate predicted d13C
-#' @param ... additional parameters to func
-calculate_residuals <- function(f, d13C, func, ...) {
-  d13C - func(f, ...)
-}
-
-# d13C functions
-# for catabolism only (k=1, alpha_B/CH4 = 1) and catabolism + anabolism (k != 1, alpha_B/CH4 != 1)
-calculate_d13C_CO2 <- function(f, alpha_CO2_CH4, d13C_CO2_t0, k = 1, ...) {
-  (f^(alpha_CO2_CH4 * k - 1) * (d13C_CO2_t0/1000 + 1) - 1) * 1000
-}
-calculate_d13C_CH4 <- function(f, alpha_CO2_CH4, d13C_CO2_t0, k = 1, ...) {
-  ( (1 - f^(alpha_CO2_CH4 * k)) / ((1 - f) * k) * (d13C_CO2_t0/1000 + 1) - 1) * 1000
-}
-calculate_d13C_B <- function(f, alpha_CO2_CH4, d13C_CO2_t0, k = 1, alpha_B_CH4 = 1) {
-  ( alpha_B_CH4 * (1 - f^(alpha_CO2_CH4 * k)) / ((1 - f) * k) * (d13C_CO2_t0/1000 + 1) - 1) * 1000
-}
-
-# 1d optimization
-calculate_1step_model_residuals <- function(alpha_CO2_CH4, k = 1, alpha_B_CH4 = 1) {
-  data_for_model |> 
-    filter(compound %in% c("CO2", "CH4", "biomass")) |>
-    mutate(
-      .by = "compound",
-      resids = calculate_residuals(
-        f = f_CO2_avg, d13C = d13C_avg, 
-        func = if (compound[1] == "CO2") calculate_d13C_CO2 
-          else if (compound[1] == "CH4") calculate_d13C_CH4
-          else if (compound[1] == "biomass") calculate_d13C_B
-          else stop("shouldn't happen"), 
-        alpha_CO2_CH4 = alpha_CO2_CH4, d13C_CO2_t0 = params$d_CO2_t0,
-        k = !!k, alpha_B_CH4 = !!alpha_B_CH4
-      )) |>
-    pull(resids)
-}
-
-# results
-catabolism_only_results <- 
-  optim(
-    fn = function(x) sum(calculate_1step_model_residuals(x) ^ 2),
-    par = 1, method = "Brent", lower = 0, upper = 2
-  )
-
-# rmse (in permil)
-catabolism_only_results$rmse <- 
-  sqrt(catabolism_only_results$value/nrow(data_for_model))
-
-# printout
-catabolism_only_results |>
-  with(
-  sprintf("For catabolism only:\nThe estimated fractionation between CO2 and CH4 is %.3f (%.1f\U2030)\nThe RMSE is %.1f\U2030.", 
-        par, 1000 * (par - 1), rmse) |> message()
-  )
-```
-
-
-## Catabolism + anabolism
+### Catabolism + anabolism
 
 $$
 \begin{aligned}
@@ -252,37 +218,90 @@ $$
 \end{aligned}
 $$
 
+### Implementation
+
 ```{r}
-# calculate 1 step k 
-calculate_k1 <- function(alpha_B_CH4, Y) {
-  return(1 + Y * (alpha_B_CH4 - 1))
+# general data for model (i.e. not phytane)
+data_for_model <- data_avgs |> filter(compound %in% c("CO2", "CH4", "biomass"))
+
+# d13C functions
+# for catabolism only (Y = 0) and catabolism + anabolism (Y > 0)
+calculate_k1 <- function(alpha_B_CH4, Y) return(1 + Y * (alpha_B_CH4 - 1))
+calculate_d13C_CO2 <- function(f, alpha_CO2_CH4, alpha_B_CH4 = 1, d13C_CO2_t0, Y = 0) {
+  k <- calculate_k1(alpha_B_CH4, Y)
+  (f^(alpha_CO2_CH4 * k - 1) * (d13C_CO2_t0/1000 + 1) - 1) * 1000
+}
+calculate_d13C_CH4 <- function(f, alpha_CO2_CH4, alpha_B_CH4 = 1, d13C_CO2_t0, Y = 0) {
+  k <- calculate_k1(alpha_B_CH4, Y)
+  ( (1 - f^(alpha_CO2_CH4 * k)) / ((1 - f) * k) * (d13C_CO2_t0/1000 + 1) - 1) * 1000
+}
+calculate_d13C_B <- function(f, alpha_CO2_CH4, alpha_B_CH4 = 1, d13C_CO2_t0, Y = 0) {
+  dCH4 <- calculate_d13C_CH4(f, alpha_CO2_CH4, alpha_B_CH4, d13C_CO2_t0, Y)
+  return((alpha_B_CH4 * (dCH4/1000 + 1) - 1) * 1000)
 }
 
-# optimization for catabolism + anabolism model
-catabolism_anabolism_results <- 
-  optim(
-    fn = function(x) sum(
-      calculate_1step_model_residuals(
-        x, 
-        k = calculate_k1(alpha_B_CH4 = params$a_B_CH4, Y = params$Y), 
-        alpha_B_CH4 = params$a_B_CH4
-      ) ^ 2),
-    par = 1, method = "Brent", lower = 0, upper = 2
+# calculate d13C for the different compounds
+calculate_d13C <- function(f, compound, alpha_CO2_CH4, alpha_B_CH4 = 1, Y = 0) {
+  tibble(f = f, compound = compound) |>
+    mutate(
+      .by = "compound",
+      d13C_est = 
+        do.call(if (compound[1] == "CO2") calculate_d13C_CO2 
+          else if (compound[1] == "CH4") calculate_d13C_CH4
+          else if (compound[1] == "biomass") calculate_d13C_B
+          else stop("shouldn't happen"),
+          list(
+            f = .data$f,
+            alpha_CO2_CH4 = !!alpha_CO2_CH4, 
+            alpha_B_CH4 = !!alpha_B_CH4,
+            d13C_CO2_t0 = params$d_CO2_t0,
+            Y = !!Y
+          )
+      )) |>
+    pull(d13C_est)
+}
+```
+
+### Results
+
+```{r}
+# catabolism only
+cat_only <- 
+  nls(
+    d13C_avg ~ calculate_d13C(f_CO2_avg, compound, alpha_CO2_CH4),
+    data = data_for_model, start = list(alpha_CO2_CH4 = 1)
   )
+cat_only_result <- bind_cols(broom::glance(cat_only), broom::tidy(cat_only))
 
-# rmse (in permil)
-catabolism_anabolism_results$rmse <- 
-  sqrt(catabolism_anabolism_results$value/nrow(data_for_model))
+# anabolism & catabolism
+# non-linear least squares fit
+cat_anab <- 
+  nls(
+    d13C_avg ~ calculate_d13C(
+      f_CO2_avg, compound, 
+      alpha_CO2_CH4 = alpha_CO2_CH4,
+      alpha_B_CH4 = alpha_B_CH4[1],
+      Y = Y[1]),
+    data = data_for_model |> mutate(Y = !!params$Y, alpha_B_CH4 = !!params$a_B_CH4), 
+    start = list(alpha_CO2_CH4 = 1)
+  )
+cat_anab_result <- bind_cols(broom::glance(cat_anab), broom::tidy(cat_anab))
 
-# printout
-catabolism_anabolism_results |>
+# results comparison
+cat_only_result |>
   with(
-  sprintf("For catabolism + anabolism:\nThe measured (from final products) fractionation between biomass and CH4 is %.3f (%.1f\U2030)\nThe estimated fractionation between CO2 and CH4 is %.3f (%.1f\U2030)\nThe RMSE is %.1f\U2030.", 
-        params$a_B_CH4, 1000 * (params$a_B_CH4 - 1), par, 1000 * (par - 1), rmse) |> message()
+  sprintf("For catabolism only:\nThe estimated fractionation between CO2 and CH4 is %.3f \U00B1 %.3f (%.1f \U00B1 %.1f\U2030)\nThe RMSE is %.1f\U2030.", 
+        estimate, std.error, 1000 * (estimate - 1), 1000 * std.error, sigma) |> message()
+  )
+cat_anab_result |>
+  with(
+  sprintf("For catabolism + anabolism:\nThe measured (from final products) fractionation between biomass and CH4 is %.3f (%.1f\U2030).\nThe estimated fractionation between CO2 and CH4 is %.3f \U00B1 %.3f (%.1f \U00B1 %.1f\U2030)\nThe RMSE is %.1f\U2030.", 
+          params$a_B_CH4, 1000 * (params$a_B_CH4 - 1),
+          estimate, std.error, 1000 * (estimate - 1), 1000 * std.error, sigma) |> message()
   )
 ```
 
-## Catabolism + partial anabolism
+## Two step model: catabolism + partial anabolism
 
 ### Step 1
 
@@ -342,7 +361,20 @@ $$
       }{ (1 - f - Y) \cdot k_2 } \\
       \frac{R_{B}}{R_{CO2_0}} &= \alpha_{B/CH4} \cdot \frac{R_{CH_4}[f=f_{s1}]}{R_{CO2_0}}
     \end{array}
-  \right. 
+  \right. \\
+  \text{ with }
+    k_2 &= 1 + Y \cdot \frac{\alpha_{B/CH4} - 1}{1 - f_{s1}}
+\end{aligned}
+$$
+
+
+and thus the overall B/CH4 fractionation factor and $f_{s1}$ are dependent on each other the following equation whose solution can be found numerically by root finding:
+
+$$
+\begin{aligned}
+\frac{R_{B_{f=0}}}{R_{CO2_0}} 
+  &= \frac{1 - f_{s1}^{\alpha_{CO2\rightarrow CH4} \cdot k_2}}{(1-f_{s1})\cdot k_2} \cdot \alpha_{B/CH4} \\
+  &= \frac{1 - f_{s1}^{\alpha_{CO2\rightarrow CH4} \cdot (1 + Y \cdot \frac{\alpha_{B/CH4} - 1}{1 - f_{s1}})}}{1-f_{s1} + Y \cdot (\alpha_{B/CH4} - 1)} \cdot \alpha_{B/CH4}
 \end{aligned}
 $$
 
@@ -351,11 +383,9 @@ $$
 ```{r}
 # d13C functions
 # for the 2 step process
-calculate_k2 <- function(f_s1, Y, alpha_B_CH4) {
-  1 - Y * (1 - alpha_B_CH4) / (1 - f_s1)
-}
+calculate_k2 <- function(f_s1, alpha_B_CH4, Y) return(1 - Y * (1 - alpha_B_CH4) / (1 - f_s1))
 calculate_2step_d13C_CO2 <- function(f, f_s1, alpha_CO2_CH4, alpha_B_CH4, d13C_CO2_t0, Y) {
-  k2 <- calculate_k2(f_s1 = f_s1, Y = Y, alpha_B_CH4 = alpha_B_CH4)
+  k2 <- calculate_k2(f_s1 = f_s1, alpha_B_CH4 = alpha_B_CH4, Y = Y)
   alpha <- ifelse(
     f >= f_s1,
     f^(alpha_CO2_CH4 * k2 - 1),
@@ -364,7 +394,7 @@ calculate_2step_d13C_CO2 <- function(f, f_s1, alpha_CO2_CH4, alpha_B_CH4, d13C_C
   return((alpha * (d13C_CO2_t0/1000 + 1) - 1) * 1000)
 }
 calculate_2step_d13C_CH4 <- function(f, f_s1, alpha_CO2_CH4, alpha_B_CH4, d13C_CO2_t0, Y) {
-  k2 <- calculate_k2(f_s1 = f_s1, Y = Y, alpha_B_CH4 = alpha_B_CH4)
+  k2 <- calculate_k2(f_s1 = f_s1, alpha_B_CH4 = alpha_B_CH4, Y = Y)
   alpha <- ifelse(
     f >= f_s1,
     (1 - f^(alpha_CO2_CH4 * k2)) / ((1 - f) * k2),
@@ -375,12 +405,13 @@ calculate_2step_d13C_CH4 <- function(f, f_s1, alpha_CO2_CH4, alpha_B_CH4, d13C_C
   return((alpha * (d13C_CO2_t0/1000 + 1) - 1) * 1000)
 }
 calculate_2step_d13C_B <- function(f, f_s1, alpha_CO2_CH4, alpha_B_CH4, d13C_CO2_t0, Y) {
-  dCH4 <- calculate_d13C_CH4(
+  dCH4 <- calculate_2step_d13C_CH4(
     f = ifelse(f >= f_s1, f, f_s1), f_s1 = f_s1, alpha_CO2_CH4 = alpha_CO2_CH4,
     alpha_B_CH4 = alpha_B_CH4, d13C_CO2_t0 = d13C_CO2_t0, Y = Y
   )
   return((alpha_B_CH4 * (dCH4/1000 + 1) - 1) * 1000)
 }
+# root-finding calculation to get alpha_B/CH4 from f_s1
 calculate_alpha_B_CH4_from_f_s1 <- function(d13C_B_f, f_s1, alpha_CO2_CH4, d13C_CO2_t0, Y) {
   uniroot(
     function(a) d13C_B_f  - calculate_2step_d13C_B(
@@ -392,77 +423,120 @@ calculate_alpha_B_CH4_from_f_s1 <- function(d13C_B_f, f_s1, alpha_CO2_CH4, d13C_
   )$root
 }
 
-# 2d optimization
-calculate_2step_model_residuals <- function(f_s1, alpha_CO2_CH4) {
-  alpha_B_CH4 <- 
-    calculate_alpha_B_CH4_from_f_s1(
-      d13C_B_f = params$d_B_f,
-      f_s1 = f_s1, alpha_CO2_CH4 = alpha_CO2_CH4,
-      d13C_CO2_t0 = params$d_CO2_t0,
-      Y = params$Y
-    )
-  data_for_model |> 
-    filter(compound %in% c("CO2", "CH4", "biomass")) |>
-    mutate(
-      .by = "compound",
-      resids = calculate_residuals(
-        f = f_CO2_avg, d13C = d13C_avg, 
-        func = if (compound[1] == "CO2") calculate_2step_d13C_CO2 
-          else if (compound[1] == "CH4") calculate_2step_d13C_CH4
-          else if (compound[1] == "biomass") calculate_2step_d13C_B
-          else stop("shouldn't happen"), 
-        f_s1 = !!f_s1, 
-        alpha_CO2_CH4 = !!alpha_CO2_CH4,
-        alpha_B_CH4 = !!alpha_B_CH4,
-        d13C_CO2_t0 = !!params$d_CO2_t0,
-        Y = !!params$Y
-      )) |>
-    pull(resids)
-}
-
-# optimization for catabolism + partial anabolism model
-# NOTE: not enough timepoint data for the biomass to really constrain this
-# so this implementation is more for future dataset and here has a set
-# f_s1 example as proof of concept
-f_s1_set <- 0.15
-catabolism_partial_anabolism_results <- 
-  optim(
-    fn = function(x) sum(
-      calculate_2step_model_residuals(x[1], x[2]) ^ 2),
-    par = c(f_s1_set, 1),
-    method = "L-BFGS-B",
-    lower = c(f_s1_set - 0.01, 0.5),
-    upper = c(f_s1_set, 2.0)
-  )
-
-# rmse (in permil)
-catabolism_partial_anabolism_results <-
-  catabolism_partial_anabolism_results |>
-  within({
-    rmse <- sqrt(value/nrow(data_for_model))
-    f_s1 <- par[1]
-    alpha_CO2_CH4 <- par[2]
+# calculate d13C for the different compounds
+calculate_2step_d13C <- function(f, f_s1, compound, alpha_CO2_CH4, alpha_B_CH4 = NULL, Y = params$Y) {
+  # fractionation factor for biomass vs CH4
+  if (is.null(alpha_B_CH4)) {
     alpha_B_CH4 <- 
       calculate_alpha_B_CH4_from_f_s1(
         d13C_B_f = params$d_B_f,
         f_s1 = f_s1, alpha_CO2_CH4 = alpha_CO2_CH4,
         d13C_CO2_t0 = params$d_CO2_t0,
-        Y = params$Y
+        Y = Y
       )
-  })
-
-
-# printout
-catabolism_partial_anabolism_results |>
-  with(
-  sprintf("For catabolism + partial anabolism:\nIf the f_CO2 at which anabolism stops is set to %.2f%%\nThe estimated fractionation between CO2 and CH4 is %.3f (%.1f\U2030)\nThe resulting fractionation between biomass and methane is %.3f (%.1f\U2030).\nThe RMSE of the fit is %.1f\U2030.",
-        f_s1 * 100, alpha_CO2_CH4, 1000 * (alpha_CO2_CH4 - 1), alpha_B_CH4, 1000 * (alpha_B_CH4 - 1), rmse) |> message()
-  )
+  }
+  
+  # calculate
+  tibble(f = f, compound = compound) |>
+    mutate(
+      .by = "compound",
+      d13C_est = 
+        do.call(if (compound[1] == "CO2") calculate_2step_d13C_CO2 
+          else if (compound[1] == "CH4") calculate_2step_d13C_CH4
+          else if (compound[1] == "biomass") calculate_2step_d13C_B
+          else stop("shouldn't happen"),
+          list(
+            f = .data$f,
+            f_s1 = !!f_s1, 
+            alpha_CO2_CH4 = !!alpha_CO2_CH4, 
+            alpha_B_CH4 = !!alpha_B_CH4,
+            d13C_CO2_t0 = params$d_CO2_t0,
+            Y = !!Y
+          )
+      )) |>
+    pull(d13C_est)
+}
 ```
 
+### Results
+
+```{r}
+# 2 step process
+# non-linear least squares fit
+solve_2step_nls <- function(f_s1) {
+  cat_anab_partial <- 
+  nls(
+    d13C_avg ~ calculate_2step_d13C(
+      f_CO2_avg, f_s1 = f_s1[1],
+      compound, alpha_CO2_CH4 = alpha_CO2_CH4,
+      Y = Y[1]),
+    data = data_for_model |> 
+      mutate(Y = !!params$Y, f_s1 = !!f_s1), 
+    start = list(alpha_CO2_CH4 = 1)
+  )
+  out <- bind_cols(broom::glance(cat_anab_partial), broom::tidy(cat_anab_partial))
+  alpha_B_CH4 <- 
+    calculate_alpha_B_CH4_from_f_s1(
+      d13C_B_f = params$d_B_f,
+      f_s1 = f_s1, alpha_CO2_CH4 = out$estimate[1],
+      d13C_CO2_t0 = params$d_CO2_t0,
+      Y = params$Y
+    )
+  return(mutate(out, alpha_B_CH4 = alpha_B_CH4, .before = 1L))
+}
+
+# explore solution space
+cat_anab_partial_results <- 
+  tibble(
+    f_s1 = seq(0, 0.31, by = 0.01),
+    result = map(f_s1, solve_2step_nls)
+  ) |>
+  unnest(result)
+
+# printout
+cat_anab_partial_results |>
+  filter(f_s1 == 0.15) |>
+  with(
+  sprintf("For catabolism + partial anabolism:\nIf the f_CO2 at which anabolism stops is set to %.2f%%\nThe estimated fractionation between CO2 and CH4 is %.3f \U00B1 %.3f (%.1f \U00B1 %.1f\U2030).\nFor all solutions, this ranges from %.3f (%.1f \U2030) to %.3f (%.1f \U2030) with virtually identical errors.\nThe resulting fractionation between biomass and methane is %.3f (%.1f\U2030).\nThe RMSE of the fit is %.1f\U2030.",
+        f_s1 * 100, estimate, std.error, 1000 * (estimate - 1), 1000 * std.error, 
+        min(cat_anab_partial_results$estimate), 1000 * (min(cat_anab_partial_results$estimate) - 1),
+        max(cat_anab_partial_results$estimate), 1000 * (max(cat_anab_partial_results$estimate) - 1), 
+        alpha_B_CH4, 1000 * (alpha_B_CH4 - 1), sigma) |> message()
+  )
+
+```
 
 # Visualization
 
+## SI Fig: alpha_B/CH4 vs. f_s1
+
+```{r}
+#| label: fig-s1-alpha-B-CH4-vs-f-s1
+#| fig-width: 8
+#| fig-height: 5
+cat_anab_partial_results |>
+  ggplot() +
+  aes(f_s1, alpha_B_CH4) +
+  # data
+  geom_line() +
+  geom_point(data = ~filter(.x, f_s1 == 0.15), size = 3) +
+  # scales
+  scale_x_reverse(
+    breaks = seq(0, 1, by = 0.05),
+    expand = c(0, 0), labels = scales::label_percent()
+  ) +
+  scale_y_continuous(
+    labels = function(x) {
+      sprintf("%.3f\n(%+.0f\U2030)", x, 1000 * (x-1))
+    }
+  ) +
+  # design
+  theme_figure(grid = FALSE, plot_margin = margin(t = 0.03, r = 0.05, unit = "npc")) +
+  labs(
+    x = "CO2 remaining when anabolism stops", 
+    y = expression(alpha["B/CH4"])
+  )
+```
 
 ```{r}
 # model the data based on parameters ... (which get passed to the calculate functions)
@@ -489,12 +563,13 @@ model_data <- function(f, steps,...) {
 }
 ```
 
-## Plot data + models
+## Fig: data + models
 
 ```{r}
 #| label: fig-data-and-model
 #| fig-width: 8
-#| fig-height: 6
+#| fig-height: 5
+f_s1_set <- 0.15
 data_avgs |> 
   ggplot() +
   aes(
@@ -504,37 +579,43 @@ data_avgs |>
   ) +
   # stationary phase
   annotate(
-    "rect", ymin = -Inf, ymax = +Inf, xmin = -0.03, xmax = 0.03,
+    "rect", ymin = -Inf, ymax = +Inf, xmin = -0.02, xmax = 0.04,
     color = NA, fill = "gray60"
   ) +
   # no growth phase if 2-step
   annotate(
-    "rect", ymin = -Inf, ymax = +Inf, xmin = 0.03, xmax = f_s1_set,
+    "rect", ymin = -Inf, ymax = +Inf, xmin = 0.04, xmax = f_s1_set,
     color = NA, fill = "gray90"
   ) +
   # model (1-step)
   geom_line(
-    data = model_data(
-      f = seq(1, 0, length.out = 1000),
-      steps = 1, 
-      alpha_CO2_CH4 = catabolism_anabolism_results$par,
-      d13C_CO2_t0 = params$d_CO2_t0,
-      k = 1 + params$Y * (params$a_B_CH4 - 1),
-      alpha_B_CH4 = params$a_B_CH4
-    ) |> mutate(model = "1-step"),
+    data = 
+      crossing(
+        model = "1-step",
+        compound = c("CO2", "CH4", "biomass"),
+        f = seq(1, 0, length.out = 1000)
+      ) |>
+      mutate(
+        d13C = calculate_d13C(
+          f, compound, 
+          alpha_CO2_CH4 = cat_anab_result$estimate, 
+          alpha_B_CH4 = params$a_B_CH4, Y = params$Y)
+      ) |> filter(!is.infinite(d13C), !is.nan(d13C)),
     map = aes(x = f, y = d13C, linetype = model)
   ) +
   # model (2-step)
   geom_line(
-    data = model_data(
-      f = seq(1, 0, length.out = 1000),
-      steps = 2, 
-      f_s1 = catabolism_partial_anabolism_results$f_s1,
-      alpha_CO2_CH4 = catabolism_partial_anabolism_results$alpha_CO2_CH4,
-      alpha_B_CH4 = catabolism_partial_anabolism_results$alpha_B_CH4,
-      d13C_CO2_t0 = params$d_CO2_t0,
-      Y = params$Y
-    ) |> mutate(model = "2-step"),
+    data = 
+      crossing(
+        model = "2-step",
+        compound = c("CO2", "CH4", "biomass"),
+        f = seq(1, 0, length.out = 1000)
+      ) |>
+      mutate(
+        d13C = calculate_2step_d13C(
+          f, f_s1 = f_s1_set, compound, 
+          alpha_CO2_CH4 = filter(cat_anab_partial_results, f_s1 == f_s1_set)$estimate)
+      ) |> filter(!is.infinite(d13C), !is.nan(d13C)),
     map = aes(x = f, y = d13C, linetype = model)
   ) +
   # starting line
