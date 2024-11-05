@@ -12,6 +12,9 @@
 *.docx
 *.xlsx
 *.csv
+*.aux
+*.log
+*.tex
 *cache/**/*
 output/**/*
 plots/**/*
