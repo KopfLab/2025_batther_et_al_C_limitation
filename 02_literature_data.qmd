@@ -47,28 +47,39 @@ library(tidyverse)
 # load scripts
 source("scripts/plotting_functions.R")
 ```
+
 # Data
 
 ```{r}
+
+```
+
+
+```{r}
 # load study data
-this_data <- readxl::read_excel("data/batch_culture_data.xlsx") |>
+this_data <- 
+  readxl::read_excel("output/table1.xlsx", "all") |>
   filter(growth_phase == "stationary") |>
+  select("compound", "d13C_avg") |>
+  pivot_wider(names_from = "compound", values_from = "d13C_avg") |>
   transmute(
     paper = "this study",
     substrate = "H2/CO2",
-    methane = CH4_corrected_standards,
-    lipids = d13C_phytane.permil,
-    biomass = d13C_biomass.permil
+    c_substrate_limited = "yes",
+    methane = CH4,
+    lipids = phytane,
+    biomass = biomass
   ) 
 this_data |> knitr::kable()
 
 # load literature data
 literature_data <- readxl::read_excel("data/clim_figure2_table1.xlsx") |>
-  filter(str_detect(paper, "Londry|Summons et al")) |>
+  filter(`culture vs field` == "culture") |>
   pivot_wider(
-    id_cols = c("paper", "culture vs field", "substrate", "details"),
+    id_cols = c("paper", "culture vs field", "substrate", "details", "c_substrate_limited"),
     values_from = "d13C_value", names_from = "product"
   )
+literature_data |> knitr::kable()
 
 # combine data
 data <- bind_rows(this_data, literature_data)
@@ -82,43 +93,111 @@ data_calcs <-
   data |>
   mutate(
     `alpha biomass/methane` = (biomass/1000 + 1) / (methane/1000 + 1),
-    `alpha lipids/biomass` = (lipids/1000 + 1) / (biomass/1000 + 1)
+    `alpha lipids/methane` = (lipids/1000 + 1) / (methane/1000 + 1)
   ) |>
-  filter(!if_any(starts_with("alpha"), is.na))
+  filter(!if_all(starts_with("alpha"), is.na))
 ```
 
 # Visualization
 
 ```{r}
-#| label: fig-literature-data
+# theme
+my_theme <- theme_bw() +
+  theme(
+    text = element_text(size = 24),
+    axis.text = element_text(size = 20),
+    axis.text.x = element_text(hjust = 0.5, vjust = 0.5),
+    axis.title.x = element_text(vjust = -1),
+    plot.title = element_text(hjust = 0.5),
+    plot.subtitle = element_text(hjust = 0.5),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_line(size = .5, linetype = 1),
+    legend.position = "right",
+    legend.direction = "vertical",
+    plot.background = element_blank(), 
+    panel.background = element_blank())
+```
+
+## Biomass Fractionation
+
+```{r}
+#| label: fig-literature-biomass
 #| fig-width: 10
-#| fig-height: 8
+#| fig-height: 6
 data_calcs |>
-  select("paper", "substrate", starts_with("alpha")) |>
+  select("paper", "details", "substrate", "c_substrate_limited", "alpha biomass/methane", "culture vs field") |>
   pivot_longer(
     cols = starts_with("alpha"),
     names_to = "factor", values_to = "alpha",
     names_pattern = "alpha (.*)"
   ) |>
+  filter(!is.na(alpha)) |>
   ggplot() +
-  aes(x = substrate, y = alpha, color = paper, shape = paper) +
+  aes(x = substrate, y = alpha, color = c_substrate_limited, shape = paper) +
+  scale_shape_manual(values = c("this study" = 19, "Londry et al., 2008" = 22, "Summons et al., 1998" = 23, "Nguyen et al., 2020" = 24, "Fuchs et al., 1979" = 25)) +
   # data
   geom_hline(yintercept = 1, linetype = 2) + 
-  geom_point(size = 4) +
+  geom_point(size = 4, stroke = 1.5) +
   # facets
-  facet_grid(factor ~ ., scales = "free_y", switch = "y") + 
+  #facet_wrap(factor ~ ., scales = "free_y", switch = "y", ncol = 1) + 
   # scales
-  scale_color_brewer(palette = "Dark2") + 
+ scale_color_manual(values = c("no" = "darkgrey", "yes" = "forestgreen")) +  
   scale_y_continuous(
-    labels = function(x) sprintf("%+.0f\U2030", 1000 * (x-1)),
-    sec.axis = sec_axis(identity, labels = identity)
+    name = expression("Fractionation factor (" * epsilon * ")"), labels = function(x) sprintf("%+.0f\U2030", 1000 * (x-1)),
+    sec.axis = sec_axis(identity, labels = identity, name = expression("Fractionation factor (" * alpha * ")"))
   ) +
   expand_limits(y = 0.99) +
   # styling
-  theme_figure(grid = FALSE) +
+  my_theme +
   theme(
     strip.background = element_blank(),
-    strip.placement = "outside"
+    strip.placement = "outside",
+    panel.spacing = unit(1, "cm"),
+    axis.title.y = element_text(margin = margin(r = 12)),       
+    axis.title.y.right = element_text(margin = margin(l = 12))
   ) +
-  labs(x = NULL, y = "fractionation factor", color = "source", shape = "source")
+  labs(shape = "Data Source", title = "Fractionation of Biomass vs. CH4", color = "Carbon-Limited", x = "Substrate") 
+```
+
+## Lipids Fractionation
+
+
+```{r}
+#| label: fig-literature-lipids
+#| fig-width: 10
+#| fig-height: 6
+data_calcs |>
+  select("paper", "details", "substrate", "c_substrate_limited", "alpha lipids/methane", "culture vs field") |>
+  pivot_longer(
+    cols = starts_with("alpha"),
+    names_to = "factor", values_to = "alpha",
+    names_pattern = "alpha (.*)"
+  ) |>
+  filter(!is.na(alpha)) |>
+  ggplot() +
+  aes(x = substrate, y = alpha, color = c_substrate_limited, shape = paper) +
+  scale_shape_manual(values = c("this study" = 19, "Londry et al., 2008" = 22, "Summons et al., 1998" = 23, "Nguyen et al., 2020" = 24, "Fuchs et al., 1979" = 25)) +
+  # data
+  geom_hline(yintercept = 1, linetype = 2) + 
+  geom_point(size = 4, stroke = 1.5) +
+  # facets
+  #facet_wrap(factor ~ ., scales = "free_y", switch = "y", ncol = 1) + 
+  # scales
+ scale_color_manual(values = c("no" = "darkgrey", "yes" = "forestgreen")) +  
+  scale_y_continuous(
+    name = expression("Fractionation factor (" * epsilon * ")"), labels = function(x) sprintf("%+.0f\U2030", 1000 * (x-1)),
+    sec.axis = sec_axis(identity, labels = identity, name = expression("Fractionation factor (" * alpha * ")"))
+  ) +
+  expand_limits(y = 0.99) +
+  # styling
+  my_theme +
+  theme(
+    strip.background = element_blank(),
+    strip.placement = "outside",
+    panel.spacing = unit(1, "cm"),
+    axis.title.y = element_text(margin = margin(r = 12)),       
+    axis.title.y.right = element_text(margin = margin(l = 12))
+  ) +
+  labs(shape = "Data Source", title = "Fractionation of Lipids vs. CH4", color = "Carbon-Limited", x = "Substrate") 
+ # gghighlight(paper == 'this study')
 ```
