@@ -73,7 +73,7 @@ this_data <-
 this_data |> knitr::kable()
 
 # load literature data
-literature_data <- readxl::read_excel("data/clim_figure2_table1.xlsx") |>
+literature_data <- readxl::read_excel("data/literature_data.xlsx") |>
   filter(`culture vs field` == "culture") |>
   pivot_wider(
     id_cols = c("paper", "culture vs field", "substrate", "details", "c_substrate_limited"),
